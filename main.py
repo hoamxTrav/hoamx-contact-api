@@ -3,6 +3,8 @@ import os
 from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
+from typing import Optional
+
 
 from sqlalchemy import create_engine, Column, Integer, Text, DateTime, func
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
@@ -64,10 +66,9 @@ def get_db():
 class ContactPayload(BaseModel):
     name: str
     email: EmailStr
-    association: str | None = None
-    role: str | None = None
+    association: Optional[str] = None
+    role: Optional[str] = None
     message: str
-
 
 # -----------------------------------------------------------------------------
 # ORM model
