@@ -1,4 +1,5 @@
 import os
+import uvicorn
 
 from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -155,12 +156,5 @@ async def create_contact(
             detail=f"Unable to submit message at this time: {exc}",
         )
 if __name__ == "__main__":
-    import uvicorn
 
-    port = int(os.getenv("PORT", "8080"))
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=port,
-        reload=False,
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
