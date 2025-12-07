@@ -13,37 +13,44 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if not DATABASE_URL:
-    # Fail fast if env var isn't set
-    raise RuntimeError("DATABASE_URL environment variable is not set")
-
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
 Base = declarative_base()
+_engine = None
+_SessionLocal = None
 
 
-class ContactMessage(Base):
-    __tablename__ = "contact_messages"
+def init_engine():
+    """
+    Lazily initialize the engine & sessionmaker.
+    This avoids crashing the container at import/startup time.
+    """
+    global _engine, _SessionLocal
 
-    id = Column(Integer, primary_key=True, index=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    name = Column(Text, nullable=False)
-    email = Column(Text, nullable=False)
-    association = Column(Text)
-    role = Column(Text)
-    message = Column(Text)
-    source_page = Column(Text, nullable=False, default="contact.html")
-    ip_address = Column(Text)
-    user_agent = Column(Text)
+    if _engine is not None and _SessionLocal is not None:
+        return
 
+    if not DATABASE_URL:
+        # Don't crash the whole service – surface a clear error on request instead.
+        raise RuntimeError("DATABASE_URL environment variable is not set")
 
-# Create table if it doesn't exist (fine to keep even if you already created it)
-Base.metadata.create_all(bind=engine)
+    try:
+        _engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+        _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
+
+        # Create tables if they don't exist
+        Base.metadata.create_all(bind=_engine)
+    except Exception as exc:
+        # Bubble up a useful error; FastAPI will turn this into a 500 on request.
+        raise RuntimeError(f"Failed to initialize database engine: {exc}") from exc
 
 
 def get_db():
-    db = SessionLocal()
+    try:
+        init_engine()
+    except RuntimeError as exc:
+        # Convert engine/init errors into HTTP 500s, not container crashes
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    db = _SessionLocal()
     try:
         yield db
     finally:
@@ -60,6 +67,25 @@ class ContactPayload(BaseModel):
     association: str | None = None
     role: str | None = None
     message: str
+
+
+# -----------------------------------------------------------------------------
+# ORM model
+# -----------------------------------------------------------------------------
+
+class ContactMessage(Base):
+    __tablename__ = "contact_messages"
+
+    id = Column(Integer, primary_key=True, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    name = Column(Text, nullable=False)
+    email = Column(Text, nullable=False)
+    association = Column(Text)
+    role = Column(Text)
+    message = Column(Text)
+    source_page = Column(Text, nullable=False, default="contact.html")
+    ip_address = Column(Text)
+    user_agent = Column(Text)
 
 
 # -----------------------------------------------------------------------------
@@ -88,6 +114,7 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
+    # Keep health simple; don't force a DB check here
     return {"status": "ok"}
 
 
@@ -117,9 +144,12 @@ async def create_contact(
         db.refresh(cm)
 
         return {"ok": True, "id": cm.id}
-    except Exception:
+    except HTTPException:
+        # Re-raise cleanly for init errors
+        raise
+    except Exception as exc:
         # In a real app: log the exception
         raise HTTPException(
             status_code=500,
-            detail="Unable to submit message at this time."
+            detail=f"Unable to submit message at this time: {exc}",
         )
