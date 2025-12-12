@@ -8,9 +8,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 
-
 from sqlalchemy import create_engine, Column, Integer, Text, DateTime, func
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
+from sqlalchemy.sql import text
 
 # -----------------------------------------------------------------------------
 # Database setup
@@ -73,6 +73,7 @@ class ContactPayload(BaseModel):
     role: Optional[str] = None
     message: str
 
+
 # -----------------------------------------------------------------------------
 # ORM model
 # -----------------------------------------------------------------------------
@@ -121,6 +122,7 @@ async def health():
     # Keep health simple; don't force a DB check here
     return {"status": "ok"}
 
+
 @app.get("/health/db")
 def health_db(request: Request, db: Session = Depends(get_db)):
     try:
@@ -148,12 +150,12 @@ def health_db(request: Request, db: Session = Depends(get_db)):
         # Still include IPs even on failure so you can whitelist
         try:
             db_host = DATABASE_URL.split("@")[1].split(":")[0]
-        except:
+        except Exception:
             db_host = "unknown"
 
         try:
             public_ip = requests.get("https://api.ipify.org").text
-        except:
+        except Exception:
             public_ip = "unknown"
 
         raise HTTPException(
@@ -162,7 +164,7 @@ def health_db(request: Request, db: Session = Depends(get_db)):
                 "message": "Database health check failed.",
                 "to_ip": db_host,
                 "from_ip": public_ip,
-            }
+            },
         )
 
 
@@ -201,6 +203,7 @@ async def create_contact(
             status_code=500,
             detail=f"Unable to submit message at this time: {exc}",
         )
-if __name__ == "__main__":
 
+
+if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
