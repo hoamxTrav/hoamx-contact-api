@@ -1,5 +1,7 @@
 import os
 import uvicorn
+import socket
+import requests
 
 from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -118,6 +120,50 @@ app.add_middleware(
 async def health():
     # Keep health simple; don't force a DB check here
     return {"status": "ok"}
+
+@app.get("/health/db")
+def health_db(request: Request, db: Session = Depends(get_db)):
+    try:
+        # Ping DB
+        db.execute(text("SELECT 1"))
+
+        # Determine destination DB host ("to" address)
+        db_host = DATABASE_URL.split("@")[1].split(":")[0]
+
+        # Determine outbound public IP ("from" address)
+        try:
+            public_ip = requests.get("https://api.ipify.org").text
+        except Exception:
+            public_ip = "unknown"
+
+        return {
+            "status": "ok",
+            "to_ip": db_host,
+            "from_ip": public_ip,
+        }
+
+    except Exception as exc:
+        print(f"health_db error: {exc!r}")
+
+        # Still include IPs even on failure so you can whitelist
+        try:
+            db_host = DATABASE_URL.split("@")[1].split(":")[0]
+        except:
+            db_host = "unknown"
+
+        try:
+            public_ip = requests.get("https://api.ipify.org").text
+        except:
+            public_ip = "unknown"
+
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "message": "Database health check failed.",
+                "to_ip": db_host,
+                "from_ip": public_ip,
+            }
+        )
 
 
 @app.post("/api/contact")
