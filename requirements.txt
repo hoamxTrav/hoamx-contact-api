@@ -6,4 +6,3 @@ pydantic
 python-dotenv
 email-validator
 requests
-socket
