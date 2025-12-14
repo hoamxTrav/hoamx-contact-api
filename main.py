@@ -1,7 +1,5 @@
 import os
 import uvicorn
-import socket
-import requests
 
 from fastapi import FastAPI, Depends, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,10 +11,15 @@ from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from sqlalchemy.sql import text
 
 # -----------------------------------------------------------------------------
-# Database setup
+# Config
 # -----------------------------------------------------------------------------
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+HEALTH_TOKEN = os.getenv("HEALTH_TOKEN")
+
+# -----------------------------------------------------------------------------
+# Database setup
+# -----------------------------------------------------------------------------
 
 Base = declarative_base()
 _engine = None
@@ -24,36 +27,29 @@ _SessionLocal = None
 
 
 def init_engine():
-    """
-    Lazily initialize the engine & sessionmaker.
-    This avoids crashing the container at import/startup time.
-    """
     global _engine, _SessionLocal
 
     if _engine is not None and _SessionLocal is not None:
         return
 
     if not DATABASE_URL:
-        # Don't crash the whole service – surface a clear error on request instead.
         raise RuntimeError("DATABASE_URL environment variable is not set")
 
-    try:
-        _engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-        _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
+    _engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    _SessionLocal = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=_engine,
+    )
 
-        # Create tables if they don't exist
-        Base.metadata.create_all(bind=_engine)
-    except Exception as exc:
-        # Bubble up a useful error; FastAPI will turn this into a 500 on request.
-        raise RuntimeError(f"Failed to initialize database engine: {exc}") from exc
+    Base.metadata.create_all(bind=_engine)
 
 
 def get_db():
     try:
         init_engine()
     except RuntimeError as exc:
-        # Convert engine/init errors into HTTP 500s, not container crashes
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Database not configured")
 
     db = _SessionLocal()
     try:
@@ -103,80 +99,61 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# CORS: allow your website to call the API directly
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://www.hoamx.com",
         "https://hoamx.com",
-        # add staging domains here if you have them
     ],
     allow_credentials=True,
-    allow_methods=["POST", "OPTIONS", "GET"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
+# -----------------------------------------------------------------------------
+# Health endpoints
+# -----------------------------------------------------------------------------
 
 @app.get("/health")
-async def health():
-    # Keep health simple; don't force a DB check here
+def health():
     return {"status": "ok"}
 
 
 @app.get("/health/db")
-def health_db(request: Request, db: Session = Depends(get_db)):
+def health_db(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    token = request.headers.get("x-health-token")
+    if not HEALTH_TOKEN or token != HEALTH_TOKEN:
+        # Hide existence
+        raise HTTPException(status_code=404, detail="not found")
+
     try:
-        # Ping DB
         db.execute(text("SELECT 1"))
-
-        # Determine destination DB host ("to" address)
-        db_host = DATABASE_URL.split("@")[1].split(":")[0]
-
-        # Determine outbound public IP ("from" address)
-        try:
-            public_ip = requests.get("https://api.ipify.org").text
-        except Exception:
-            public_ip = "unknown"
-
-        return {
-            "status": "ok",
-            "to_ip": db_host,
-            "from_ip": public_ip,
-        }
-
+        return {"status": "ok"}
     except Exception as exc:
         print(f"health_db error: {exc!r}")
+        raise HTTPException(status_code=500, detail="db error")
 
-        # Still include IPs even on failure so you can whitelist
-        try:
-            db_host = DATABASE_URL.split("@")[1].split(":")[0]
-        except Exception:
-            db_host = "unknown"
 
-        try:
-            public_ip = requests.get("https://api.ipify.org").text
-        except Exception:
-            public_ip = "unknown"
-
-        raise HTTPException(
-            status_code=500,
-            detail={
-                "message": "Database health check failed.",
-                "to_ip": db_host,
-                "from_ip": public_ip,
-            },
-        )
-
+# -----------------------------------------------------------------------------
+# Contact endpoint
+# -----------------------------------------------------------------------------
 
 @app.post("/api/contact")
-async def create_contact(
+def create_contact(
     payload: ContactPayload,
     request: Request,
     db: Session = Depends(get_db),
 ):
     try:
-        client_host = request.client.host if request.client else None
-        user_agent = request.headers.get("user-agent")
+        client_ip = (
+            request.headers.get("x-forwarded-for", "").split(",")[0]
+            or request.client.host
+            if request.client
+            else None
+        )
 
         cm = ContactMessage(
             name=payload.name.strip(),
@@ -185,8 +162,8 @@ async def create_contact(
             role=(payload.role or "").strip() or None,
             message=payload.message.strip(),
             source_page="contact.html",
-            ip_address=client_host,
-            user_agent=user_agent,
+            ip_address=client_ip,
+            user_agent=request.headers.get("user-agent"),
         )
 
         db.add(cm)
@@ -194,16 +171,22 @@ async def create_contact(
         db.refresh(cm)
 
         return {"ok": True, "id": cm.id}
-    except HTTPException:
-        # Re-raise cleanly for init errors
-        raise
+
     except Exception as exc:
-        # In a real app: log the exception
+        print(f"contact insert error: {exc!r}")
         raise HTTPException(
             status_code=500,
-            detail=f"Unable to submit message at this time: {exc}",
+            detail="Unable to submit message at this time.",
         )
 
 
+# -----------------------------------------------------------------------------
+# Local entrypoint (Cloud Run ignores this, but it’s fine to keep)
+# -----------------------------------------------------------------------------
+
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", "8080")))
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8080")),
+    )
